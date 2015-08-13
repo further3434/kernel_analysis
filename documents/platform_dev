@@ -1,0 +1,133 @@
+platform总线
+linux2.6内核加入的一种虚拟总线。由两部分组成：
+platform_device和platform_driver
+加入platform总线之后，platform_driver在使用device的资源的时候，可以通过platform的一系列接口来实现，这样实现了platform_device的统一管理，
+提高了程序的可移植性。
+1、在系统启动初始化时创建了platform_bus设备和platform_bus_type总线
+在内核启动过程中，start_kernel、rest_init、kernel_init、init_post等4个函数构成了整个初始化过程的主线
+start_kernel、rest_init完成内核准备工作
+kernel_init函数完成设备驱动程序的初始化，并调用init_post函数启动用户空间的init进程。
+platform_bus设备和platform_bus_type总线在kernel_init函数阶段被创建
+kernel_init ->(调用)do_basic_setup()->(调用)platform_bus_init()
+int __init platform_bus_init(void){
+       error =  device_register(&platform_bus);			//platform_bus.name = “platform”
+       error =  bus_register(&platform_bus_type);		//platform_bus_type.name= “platform”
+}
+device_register把设备名为platform 的设备注册到系统中(即/sys/devices/platform)
+bus_register注册了名为platform 的总线(即/sys/bus/platform)
+struct bus_type platform_bus_type = {
+       .name             = "platform",
+       .dev_attrs       = platform_dev_attrs,
+       .match           = platform_match,
+       .uevent           = platform_uevent,				
+       .pm         = &platform_dev_pm_ops,
+};
+
+platform_match函数：
+static int platform_match(struct device *dev, struct device_driver *drv){
+       struct platform_device *pdev = to_platform_device(dev);
+       struct platform_driver *pdrv = to_platform_driver(drv);
+
+       /* match against the id table first */
+       if (pdrv->id_table)
+              return platform_match_id(pdrv->id_table, pdev) != NULL;
+       /* fall-back to driver name match */
+       return (strcmp(pdev->name, drv->name) == 0);
+}
+platform_device与platform_driver进行id匹配(一般为-1,匹配不成功。id匹配实际是id->name的匹配)
+platform_device与platform_driver进行name匹配(两个匹配其实是一样的)
+
+
+2、在具体的设备和驱动代码中，platform_device与platform_driver
+int platform_device_register(struct platform_device *pdev);
+int platform_driver_register(struct platform_driver *drv);
+
+先看platform_device_register代码：
+int platform_device_register(struct platform_device *pdev){
+	device_initialize(&pdev->dev);		//设备初始化
+	arch_setup_pdev_archdata(pdev);		
+	ret = platform_device_add(pdev);	//挂载设备
+    return ret;
+}
+主要是初始化,然后通过platform_device->dev.parents、platform_device->id、platform_device->name等，进行
+device_add操作。
+注意：device_add()仅仅注册一个设备到内核(在/sys/devices/platform/下面)，没有在dev下面创建设备
+其实它就是初始化pdev->dev后调用platform_device_add()把它注册到platform_bus_type上
+
+再看platform_driver_register代码：
+int platform_driver_register(struct platform_driver *drv){
+	drv->driver.bus = &platform_bus_type;						//最早之前的platform_bus_type总线
+	if (drv->probe)
+		drv->driver.probe = platform_drv_probe;
+	if (drv->remove)
+		drv->driver.remove = platform_drv_remove;
+	if (drv->shutdown)
+		drv->driver.shutdown = platform_drv_shutdown;
+	return driver_register(&drv->driver);						//注册驱动
+}
+设定了platform_driver内嵌的driver的probe、remove、shutdown函数，这三个函数源码：
+static int platform_drv_probe(struct device *_dev){
+	struct platform_driver *drv = to_platform_driver(_dev->driver);
+	struct platform_device *dev = to_platform_device(_dev);
+	int ret;
+	
+	ret = drv->probe(dev);
+	return ret;
+}
+通过platform_driver内嵌的driver可以得到platform_driver、platform_device，然后实现platform_driver对于platform_device的probe、remove、shutdown函数操作
+
+driver_register的作用是把platform_driver挂到platform_bus_type总线下面(在/sys/bus/platform/下面)
+在注册成功之后，就是调用probe函数了，如何调用呢？
+看源码：
+driver_register->bus_add_driver->driver_attach->bus_for_each_dev(drv->bus, NULL, drv, __driver_attach) 遍历总线上的设备并调用__driver_attach
+static int __driver_attach(struct device *dev, void *data){
+	if (!driver_match_device(drv, dev))				//驱动和设备匹配
+		return 0;
+	if (dev->parent)	
+		device_lock(dev->parent);
+	device_lock(dev);
+	if (!dev->driver)
+		driver_probe_device(drv, dev);
+	device_unlock(dev);
+	if (dev->parent)
+		device_unlock(dev->parent);
+	return 0;
+}
+//遍历总线进行driver与device匹配
+static inline int driver_match_device(struct device_driver *drv,struct device *dev){
+	return drv->bus->match ? drv->bus->match(dev, drv) : 1;
+}
+
+driver_probe_device->really_probe(dev, drv)
+
+static int really_probe(struct device *dev, struct device_driver *drv){
+	int ret = 0;
+
+	if (dev->bus->probe) {
+		TIME_LOG_START();
+		ret = dev->bus->probe(dev);
+		 TIME_LOG_END("[probe] drv:%s dev:%s\n", drv->name, dev->init_name);
+		if (ret)
+			goto probe_failed;
+	} else if (drv->probe) {
+		TIME_LOG_START();
+		ret = drv->probe(dev);
+		TIME_LOG_END("[probe] drv:%s dev:%s\n", drv->name, dev->init_name);
+		if (ret)
+			goto probe_failed;
+	}
+}
+一般认为执行drv->probe即platform_driver->probe
+
+
+
+
+
+
+
+
+
+
+
+
+

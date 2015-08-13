@@ -1,0 +1,60 @@
+input子系统分析
+
+Linux系统提供了input子系统，按键、触摸屏、键盘、鼠标等输入都可以利用input接口函数来实现设备驱动
+这类设备的特点是：通过外设被触发，发送数据到userspace进行处理。引入input子系统的结构如下：
+userspace ———— input子系统 ———— 具体的input设备 ————硬件
+通过注册input_dev，打通userspace 到 具体的input设备 之间的联系，这样形成了统一的接口
+
+input系统的组成
+
+input子系统由驱动层（Drivers），输入子系统核心层（ Input Core ）和事件处理层（Event Handler）三部份组成。
+通过 Driver -> InputCore -> Eventhandler -> userspace 的顺序到达用户空间传给应用程序。
+下面介绍各部分的功能：
+（1）驱动层功能：负责和底层的硬件设备打交道，将底层硬件设备对用户输入的响应转换为标准的输入事件以后再向上发送给输入子系统核心层（Input Core）。
+（2）Input系统核心层：Input Core即Input Layer，由driver/input/input.c及相关头文件实现，它对下提供了设备驱动层的接口，
+	对上提供了事件处理层（Event Handler）的编程接口。
+（3）事件处理层将硬件设备上报的事件分发到用户空间和内核。
+
+在注册一个input_dev之前，需要给这个结构进行填充：
+struct input_dev中有两个成员需要注意evbit、keybit
+
+evbit:
+事件类型
+keybit
+上报键值
+就是根据外设定义需要哪些事件以及事件的具体键值。
+看注册过程：
+
+int input_register_device(struct input_dev *dev)
+{
+	一些基本的(事件以及事件的具体键值)初始化过程
+	
+	error = device_add(&dev->dev);							//添加设备
+
+	path = kobject_get_path(&dev->dev.kobj, GFP_KERNEL);
+	pr_info("%s as %s\n",
+		dev->name ? dev->name : "Unspecified device",
+		path ? path : "N/A");
+	kfree(path);
+
+	list_add_tail(&dev->node, &input_dev_list);				//加入input_dev_list
+
+	list_for_each_entry(handler, &input_handler_list, node)	//重点部分，匹配handler
+		input_attach_handler(dev, handler);
+	}
+	return 0;
+}
+主要分为三步：
+	1、添加设备————使userspace出现设备，挂载到设备树上
+	2、加入到input_dev_list链表中
+	3、与input_handler_list的handler进行匹配
+input_handler_list里面保存着input events处理函数，最早之前的一系列初始化配置就是为了找到符合的handler进行匹配
+list_for_each_entry(handler, &input_handler_list, node)			//这是一个宏定义
+input_attach_handler(dev, handler);
+这个函数就是遍历input_handler_list上的每一个handler与input_dev进行匹配，匹配成功则调用handler->connect()
+handler与input_dev是通过handle进行关联的，handle->dev与handle->handler匹配，类似于他们的总线
+
+
+
+
+

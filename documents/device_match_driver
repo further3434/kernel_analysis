@@ -1,0 +1,89 @@
+platform两种注册过程：
+
+匹配过程一：(代码)
+static int __init tpd_device_init(void){
+	platform_device_register(&tpd_device);
+	platform_driver_register(&tpd_driver);
+}
+struct platform_device tpd_device = {
+    .name   	= TPD_DEVICE,
+    .id        	= -1,
+};
+static struct platform_driver tpd_driver = {
+	.remove = tpd_remove,
+	.probe = tpd_probe,
+	.driver = {
+		   .name = TPD_DEVICE,
+	},
+};
+
+匹配过程二：(代码)
+int __init mtkfb_init(void){
+	platform_driver_register(&mtkfb_driver);
+}
+static const struct of_device_id mtkfb_of_ids[] = {
+	{ .compatible = "mediatek,MTKFB", },
+	{}
+};
+
+static struct platform_driver mtkfb_driver ={
+    .driver = {
+        .name    = MTKFB_DRIVER,
+        .bus     = &platform_bus_type,
+        .probe   = mtkfb_probe,
+        .remove  = mtkfb_remove,
+        .suspend = mtkfb_suspend,
+        .resume  = mtkfb_resume,
+	.shutdown = mtkfb_shutdown,
+	.of_match_table = mtkfb_of_ids,
+    },
+};
+
+分析：
+platform_driver_register->driver_register->bus_add_driver->driver_attach->bus_for_each_dev(drv->bus, NULL, drv, __driver_attach)
+
+bus_for_each_dev(drv->bus, NULL, drv, __driver_attach)————遍历drv->bus下的设备，对每一个执行__driver_attach
+	
+static int __driver_attach(struct device *dev, void *data)
+{
+	if (!driver_match_device(drv, dev))					//进行匹配
+	return 0;
+}
+
+在driver_match_device执行过程中，出现了匹配过程一和匹配过程二的区别
+static inline int driver_match_device(struct device_driver *drv,
+				      struct device *dev){
+	return drv->bus->match ? drv->bus->match(dev, drv) : 1;
+}
+在platform_driver_register函数的开头，有drv->driver.bus = &platform_bus_type;
+因此drv->bus->match就是platform_bus_type->match
+struct bus_type platform_bus_type = {
+	.name		= "platform",
+	.dev_attrs	= platform_dev_attrs,
+	.match		= platform_match,						//match函数
+	.uevent		= platform_uevent,
+	.pm		= &platform_dev_pm_ops,
+};
+
+static int platform_match(struct device *dev, struct device_driver *drv){
+	struct platform_device *pdev = to_platform_device(dev);	//得到设备
+	struct platform_driver *pdrv = to_platform_driver(drv);	//得到驱动
+	if (of_driver_match_device(dev, drv))					//driver下的of_match_table的compatible来匹配(第二种dts匹配)
+		return 1;
+	if (acpi_driver_match_device(dev, drv))					//acpi匹配(不太懂)
+		return 1;
+	if (pdrv->id_table)
+		return platform_match_id(pdrv->id_table, pdev) != NULL;// id_table匹配(一般不用)
+	return (strcmp(pdev->name, drv->name) == 0);				//name匹配(第一种匹配)
+}
+
+分析：
+	dts下的playform设备被解析注册的时候，使用了platform_device_register，因此原理上都是一样的
+	
+其他驱动的注册都可以找到driver_register函数的影子，因此类似~~~
+
+注意：：probe并不一定是驱动注册才会执行，在platform_device_register下追踪代码可以找到device_attach函数(不同于driver_attach)
+这个函数会在bus下遍历driver进行设备匹配。
+因此对于platform驱动的probe在哪执行完全取决于是设备先注册，还是驱动先注册。
+
+

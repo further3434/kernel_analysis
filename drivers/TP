@@ -1,0 +1,160 @@
+1、goodix_ts_init
+	i2c_add_driver：
+		dtsi里面的设备在解析之后通过i2c_register_board_info注册(i2c_client),它的地址对应一个物理上的i2c_adapter
+		i2c_add_driver的作用是注册驱动(挂到sysfs下面)，然后找到设备(i2c_client)匹配，然后实例化i2c_adapter
+2、static struct i2c_driver goodix_ts_driver = {
+    .probe      = goodix_ts_probe,
+    .remove     = goodix_ts_remove,
+    .id_table   = goodix_ts_id,
+    .driver = {
+        .name     = GTP_I2C_NAME,
+        .owner    = THIS_MODULE,        
+        .of_match_table = goodix_match_table,
+    },
+};
+3、执行probe是在i2c_add_driver->driver_register里面完成的，每一个驱动注册都会用到这个操作
+
+static int goodix_ts_probe(struct i2c_client *client, const struct i2c_device_id *id){
+
+    ret = goodix_parse_dt(&client->dev, pdata);						//解析dtsi文本内容
+
+    i2c_connect_client = client;
+    
+    if (!i2c_check_functionality(client->adapter, I2C_FUNC_I2C)) 	//检测i2c硬件
+    {
+        GTP_ERROR("I2C check functionality failed.");
+        return -ENODEV;
+    }    
+	
+    INIT_WORK(&ts->work, goodix_ts_work_func);						//工作队列(与tasklet的区别)
+
+    spin_lock_init(&ts->irq_lock);          						// 自旋锁
+
+	ret = goodix_ts_pinctrl_init(ts);								//pin脚初始化(input方向，上下拉)
+
+    ret = goodix_power_init(ts);									//vdd、vcc init操作
+
+    ret = goodix_power_on(ts);										//上电
+
+    gtp_reset_guitar(ts->client, 10);								//reset操作
+
+    ret = gtp_i2c_test(client);										//i2c通信测试
+
+    ret = gtp_read_version(ts, &version_info);
+    
+    ret = gtp_init_panel(ts);										//屏初始化
+    
+																	// Create proc file system(在proc下面创建一个文件用于读写操作)
+    gt91xx_config_proc = proc_create(GT91XX_CONFIG_PROC_FILE, 0666, NULL, &config_proc_ops);
+
+    ret = gtp_request_input_dev(ts);								//input_dev注册
+    
+    ret = gtp_request_irq(ts); 										//中断注册
+
+    init_wr_node(client);											//软件工具接口
+
+    factory_ts_func_test_register(ts);								//公司自己的test接口(工检接口)，在ts_func_test.c中定义
+	
+    gt9xx_ts_register_productinfo(ts);								//TP基本信息(大丛姐写的)
+}
+
+4、中断函数
+中断分为两部分，手势判断 + 触摸位置判断
+input设备注册过程
+	input_allocate_device()——申请设备内存
+	基础配置(支持事件，事件类型等)
+	注册input_register_device
+	————input_register_device->
+	device_add									添加设备
+	list_add_tail(&dev->node, &input_dev_list);	加入input_dev_list
+	input_attach_handler(dev, handler);			遍历handler列表与input_dev匹配
+input设备分为input_dev、input core层、事件处理层(handler)
+这个函数就是遍历input_handler_list上的每一个handler与input_dev进行匹配，匹配成功则调用handler->connect()
+分配了一个 evdev结构 ,这个结构封装了一个 handle结构 ,这结构可以被看成是 handler和 input device
+的信息集合体 .在这个结构里集合了匹配成功的 handler和 input device
+
+5、工检接口——————ts_func_test.c   		 唐老师写的
+module_init(ts_gen_func_test_init);
+
+static int __init ts_gen_func_test_init(void)
+{
+	int ret = 0;
+
+	ts_func_test_obj = kobject_create_and_add("ctp", NULL);
+	if (!ts_func_test_obj) {
+		gen_err("unable to create kobject\n");
+		return -ENOMEM;
+	}
+
+	ts_func_ctp_test_obj = kobject_create_and_add("ctp_test", ts_func_test_obj);
+	if (!ts_func_ctp_test_obj) {
+		gen_err("unable to create kobject-ts_func_test_obj\n");
+		goto destroy_test_obj;
+	}
+
+	ts_func_ctp_update_obj = kobject_create_and_add("ctp_update", ts_func_test_obj);
+	if (!ts_func_ctp_update_obj) {
+		gen_err("unable to create kobject-ts_func_test_obj\n");
+		goto destroy_ctp_test_obj;
+	}
+
+	ts_func_ctp_func_obj = kobject_create_and_add("ctp_func", ts_func_test_obj);
+	if (!ts_func_ctp_func_obj) {
+		gen_err("unable to create kobject-ts_func_ctp_func_obj\n");
+		goto destroy_ctp_func_obj;
+	}
+
+	ret = sysfs_create_group(ts_func_ctp_test_obj, &ts_func_ctp_test_grp);
+	if (ret) {
+		gen_err("failed to create attributes- ts_func_ctp_test_grp\n");
+		goto destroy_ctp_update_obj;
+	}
+
+	ret = sysfs_create_group(ts_func_ctp_update_obj, &ts_func_ctp_update_grp);
+	if (ret) {
+		gen_err("failed to create attributes- ts_func_ctp_update_grp\n");
+		goto remove_ctp_test_grp;
+	}
+
+
+	ret = sysfs_create_group(ts_func_ctp_func_obj, &ts_func_ctp_func_grp);
+	if (ret) {
+		gen_err("failed to create attributes- ts_func_ctp_func_grp\n");
+		goto remove_ctp_func_grp;
+	}
+
+	return 0;
+}
+
+就是创建一些节点(工检接口)，
+static struct kobj_attribute gesture_attr = {
+	.attr = {
+		.name = "gesture",				//节点名
+		.mode = S_IRUGO|S_IWUSR,		//mode
+	},
+	.show = gesture_show,				//show  相当于 read
+	.store = gesture_store,				//store 相当于 write
+};
+
+6、工检接口函数(在probe最后执行factory_ts_func_test_register，与ts_func_test.c联系到一起)
+static int factory_ts_func_test_register(struct goodix_ts_data* data)
+{
+	data->ts_test_dev.dev = &data->client->dev;
+	data->ts_test_dev.check_fw_update_need = factory_check_fw_update_need;			
+	data->ts_test_dev.get_calibration_ret = factory_get_calibration_ret;
+	data->ts_test_dev.get_fs_fw_version = factory_get_fs_fw_version;				
+	data->ts_test_dev.get_fw_update_progress = factory_get_fw_update_progress;
+	data->ts_test_dev.get_ic_fw_version = factory_get_ic_fw_version
+	data->ts_test_dev.get_module_id = factory_get_module_id;
+	data->ts_test_dev.get_rawdata = factory_get_rawdata;							
+	data->ts_test_dev.get_rawdata_info = factory_get_rawdata_info;					
+	data->ts_test_dev.proc_fw_update = factory_proc_fw_update;
+	data->ts_test_dev.proc_hibernate_test = factory_proc_hibernate_test;
+	data->ts_test_dev.proc_fw_update_with_given_file = factory_proc_fw_bin_update;
+
+	data->ts_test_dev.get_short_test= factory_short_test;
+	register_ts_func_test_device(&data->ts_test_dev);
+	return 0;
+}
+
+暂时over!!! !!! !!!
