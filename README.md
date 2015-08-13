@@ -1,2 +1,2 @@
 # kernel_analysis
-对于kernel层driver的认识
+对于kernel层driver的认识(结合源码分析大致框架)
